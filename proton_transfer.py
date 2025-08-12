@@ -438,13 +438,14 @@ def apply_proton_transfer(
     return None
 
 
-def _is_resonance_stabilized(mol: rdchem.Mol, anion_idx: int) -> bool:
+def _is_resonance_stabilized(mol: rdchem.Mol, acceptor_idx: int, donor_idx: int) -> bool:
     """
     Checks if an anion at a given index is resonance-stabilized by being adjacent to a pi system.
 
     Args:
         mol (rdchem.Mol): The molecule to check.
-        anion_idx (int): The index of the anion to check.
+        acceptor_idx (int): The index of the acceptor to check.
+        donor_idx (int): The index of the donor to check.
 
     Returns:
         bool: True if the anion is resonance-stabilized, False otherwise.
@@ -458,15 +459,77 @@ def _is_resonance_stabilized(mol: rdchem.Mol, anion_idx: int) -> bool:
         Chem.MolFromSmarts("[*-;!#1]-[!#1]#[!#1]"),  # General anion next to triple bond
     ]
     
-    # Check if the anion atom itself is aromatic
-    anion_atom = mol.GetAtomWithIdx(anion_idx)
-    if anion_atom.GetIsAromatic():
+    # Check if the acceptor atom itself is aromatic
+    acceptor_atom = mol.GetAtomWithIdx(acceptor_idx)
+    donor_atom = mol.GetAtomWithIdx(donor_idx)
+    if acceptor_atom.GetIsAromatic() or donor_atom.GetIsAromatic():
         return True
 
     # Check the substructure patterns
     for p in patterns:
         if mol.HasSubstructMatch(p):
             # Check if our specific anion is part of any match
+            for match in mol.GetSubstructMatches(p):
+                if acceptor_idx in match or donor_idx in match:
+                    return True
+    return False
+
+
+def _is_resonance_stabilized_cation(mol: rdchem.Mol, cation_idx: int) -> bool:
+    """
+    Checks if a cation at a given index is resonance-stabilized by being adjacent to a pi system.
+
+    Mirrors the anion check but requires a positively charged atom adjacent to
+    a double or triple bond, or an aromatic site.
+
+    Args:
+        mol (rdchem.Mol): The molecule to check.
+        cation_idx (int): The index of the cation to check.
+
+    Returns:
+        bool: True if the cation is resonance-stabilized, False otherwise.
+    """
+    patterns = [
+        Chem.MolFromSmarts("[*+;!#1]-[!#1]=[!#1]"),  # Cation next to double bond
+        Chem.MolFromSmarts("[*+;!#1]-[!#1]#[!#1]"),  # Cation next to triple bond
+    ]
+
+    cation_atom = mol.GetAtomWithIdx(cation_idx)
+    if cation_atom.GetIsAromatic():
+        return True
+
+    for p in patterns:
+        if mol.HasSubstructMatch(p):
+            for match in mol.GetSubstructMatches(p):
+                if cation_idx in match:
+                    return True
+    return False
+
+
+def _is_resonance_stabilized_anion(mol: rdchem.Mol, anion_idx: int) -> bool:
+    """
+    Checks if an anion at a given index is resonance-stabilized by being adjacent to a pi system.
+
+    Uses general patterns for adjacency to double or triple bonds, or aromatic site.
+
+    Args:
+        mol (rdchem.Mol): The molecule to check.
+        anion_idx (int): The index of the anion to check.
+
+    Returns:
+        bool: True if the anion is resonance-stabilized, False otherwise.
+    """
+    patterns = [
+        Chem.MolFromSmarts("[*-;!#1]-[!#1]=[!#1]"),  # Anion next to double bond
+        Chem.MolFromSmarts("[*-;!#1]-[!#1]#[!#1]"),  # Anion next to triple bond
+    ]
+
+    anion_atom = mol.GetAtomWithIdx(anion_idx)
+    if anion_atom.GetIsAromatic():
+        return True
+
+    for p in patterns:
+        if mol.HasSubstructMatch(p):
             for match in mol.GetSubstructMatches(p):
                 if anion_idx in match:
                     return True
@@ -543,6 +606,10 @@ def compute_transformation_properties(
     a_new_charge = int(a_new.GetFormalCharge())
     b_new_charge = int(b_new.GetFormalCharge())
 
+    # Compute resonance stabilization flags
+    is_res_anion = _is_resonance_stabilized_anion(new, B_idx)
+    is_res_cation = _is_resonance_stabilized_cation(new, A_idx)
+
     props = {
         "delta_charge_on_A": float(a_new_charge - a_old_charge),
         "delta_charge_on_B": float(b_new_charge - b_old_charge),
@@ -554,7 +621,11 @@ def compute_transformation_properties(
         "EN_B": get_en(b_old),
         "Radius_A": get_radius_angstrom(a_old),
         "Radius_B": get_radius_angstrom(b_old),
-        "is_resonance_stabilized": _is_resonance_stabilized(new, B_idx),
+        # Aggregate and detailed resonance flags
+        "is_resonance_stabilized": bool(is_res_anion or is_res_cation),
+        "is_resonance_stabilized_anion": is_res_anion,
+        "is_resonance_stabilized_cation": is_res_cation,
+        # Inductive is evaluated with respect to anion center (donor B)
         "inductive_score": _calculate_inductive_score(new, B_idx),
     }
     return props
@@ -623,8 +694,12 @@ def resonance_object_rule(transformation: Transformation) -> str:
     Assigns a label based on the presence of resonance stabilization
     in the conjugate base. This is a very strong stabilizing effect.
     """
-    if transformation.properties.get("is_resonance_stabilized", False):
-        return "++"  # Strong stabilization
+    rs_an = transformation.properties.get("is_resonance_stabilized_anion", False)
+    rs_cat = transformation.properties.get("is_resonance_stabilized_cation", False)
+    if rs_an and rs_cat:
+        return "++"
+    elif rs_an or rs_cat:
+        return "+"
     return "0"  # No effect
 
 
